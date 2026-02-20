@@ -75,7 +75,7 @@ ZSH_THEME="robbyrussell"
 # Add wisely, as too many plugins slow down shell startup.
 plugins=(git)
 
-source $ZSH/oh-my-zsh.sh
+[[ -f $ZSH/oh-my-zsh.sh ]] && source $ZSH/oh-my-zsh.sh
 
 # User configuration
 
@@ -140,18 +140,28 @@ npx() { unset -f npx; [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"; npx "$@"
 export YVM_DIR=/opt/homebrew/opt/yvm
 [ -r $YVM_DIR/yvm.sh ] && . $YVM_DIR/yvm.sh
 
-eval $(/opt/homebrew/bin/brew shellenv)
+[[ -x /opt/homebrew/bin/brew ]] && eval $(/opt/homebrew/bin/brew shellenv)
 
-eval "$(zoxide init zsh)"
+command -v zoxide &>/dev/null && eval "$(zoxide init zsh)"
 alias ghs='gh copilot suggest'
 alias clpd='claude -p --dangerously-skip-permissions'
 alias cld='claude --dangerously-skip-permissions'
 
+{{ if hasKey . "github_pat" -}}
 export GITHUB_PERSONAL_ACCESS_TOKEN="{{ .github_pat }}"
+{{ end -}}
+{{ if hasKey . "openai_api_key" -}}
 export OPENAI_API_KEY="{{ .openai_api_key }}"
+{{ end -}}
+{{ if hasKey . "dd_api_key" -}}
 export DD_API_KEY="{{ .dd_api_key }}"
+{{ end -}}
+{{ if hasKey . "dd_app_key" -}}
 export DD_APP_KEY="{{ .dd_app_key }}"
+{{ end -}}
+{{ if hasKey . "jira_api_token" -}}
 export JIRA_API_TOKEN="{{ .jira_api_token }}"
+{{ end -}}
 
 ### MANAGED BY RANCHER DESKTOP START (DO NOT EDIT)
 export PATH="/Users/dweaver01/.rd/bin:$PATH"
