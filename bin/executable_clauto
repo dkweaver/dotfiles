@@ -18,13 +18,6 @@ while getopts "d:" opt; do
 done
 shift $((OPTIND - 1))
 
-if [ $# -eq 0 ]; then
-  read -rp "Prompt: " prompt
-  [ -z "$prompt" ] && echo "No prompt provided." && exit 1
-else
-  prompt="$*"
-fi
-
 if [ -n "$dir" ]; then
   cd "$dir"
 else
@@ -36,6 +29,13 @@ else
     echo "Error: no directory supplied and zoxide not installed"
     exit 1
   fi
+fi
+
+if [ $# -eq 0 ]; then
+  read -rp "Prompt: " prompt
+  [ -z "$prompt" ] && echo "No prompt provided." && exit 1
+else
+  prompt="$*"
 fi
 
 # Ensure we're in a git repo
