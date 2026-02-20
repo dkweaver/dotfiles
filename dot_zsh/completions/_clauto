@@ -1,0 +1,9 @@
+#compdef clauto
+
+_clauto() {
+  _arguments \
+    '-d[Target directory]:directory:_directories' \
+    '*:prompt:'
+}
+
+_clauto "$@"
