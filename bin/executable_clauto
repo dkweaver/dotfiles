@@ -24,6 +24,15 @@ prompt="$*"
 
 if [ -n "$dir" ]; then
   cd "$dir"
+elif ! git rev-parse --is-inside-work-tree &>/dev/null; then
+  # Not in a git repo and no dir supplied — let user pick with zoxide
+  if command -v zoxide &>/dev/null; then
+    dir=$(zoxide query -i) || exit 1
+    cd "$dir"
+  else
+    echo "Error: not inside a git repository (install zoxide for interactive directory picker)"
+    exit 1
+  fi
 fi
 
 # Ensure we're in a git repo
@@ -38,13 +47,38 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
   exit 1
 fi
 
+MAX_CHANGED_FILES=10
+repo_root=$(git rev-parse --show-toplevel)
+
+guardrails="IMPORTANT RULES - you MUST follow these:
+- ONLY edit files inside this repo: $repo_root
+- Do NOT create or edit files outside the repo
+- Do NOT edit .gitignore'd files or .env files
+- Do NOT edit .git/ internals
+- Do NOT delete files unless explicitly asked
+- Do NOT install packages or run destructive commands
+- Do NOT modify CI/CD pipelines or GitHub Actions
+- Keep changes minimal and focused on the request"
+
 echo "Running Claude..."
-claude -p --dangerously-skip-permissions "$prompt"
+claude -p --dangerously-skip-permissions "$guardrails
+
+User request: $prompt"
 
 # Check if Claude made any changes
 if git diff --quiet && git diff --cached --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
   echo "No changes were made."
   exit 0
+fi
+
+# Check number of changed files
+changed_count=$(( $(git diff --name-only | wc -l) + $(git ls-files --others --exclude-standard | wc -l) ))
+if [ "$changed_count" -gt "$MAX_CHANGED_FILES" ]; then
+  echo "Error: Claude changed $changed_count files (max $MAX_CHANGED_FILES). This seems excessive."
+  echo "Reverting all changes..."
+  git checkout -- .
+  git clean -fd
+  exit 1
 fi
 
 # Collect all changes into one colored diff view
