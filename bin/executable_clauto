@@ -18,9 +18,12 @@ while getopts "d:" opt; do
 done
 shift $((OPTIND - 1))
 
-[ $# -eq 0 ] && usage
-
-prompt="$*"
+if [ $# -eq 0 ]; then
+  read -rp "Prompt: " prompt
+  [ -z "$prompt" ] && echo "No prompt provided." && exit 1
+else
+  prompt="$*"
+fi
 
 if [ -n "$dir" ]; then
   cd "$dir"
@@ -61,7 +64,7 @@ guardrails="IMPORTANT RULES - you MUST follow these:
 - Keep changes minimal and focused on the request"
 
 echo "Running Claude..."
-claude -p --dangerously-skip-permissions "$guardrails
+claude -p --dangerously-skip-permissions --model sonnet "$guardrails
 
 User request: $prompt"
 
