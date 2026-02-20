@@ -27,13 +27,13 @@ fi
 
 if [ -n "$dir" ]; then
   cd "$dir"
-elif ! git rev-parse --is-inside-work-tree &>/dev/null; then
-  # Not in a git repo and no dir supplied — let user pick with zoxide
+else
+  # No dir supplied — let user pick with zoxide
   if command -v zoxide &>/dev/null; then
     dir=$(zoxide query -i) || exit 1
     cd "$dir"
   else
-    echo "Error: not inside a git repository (install zoxide for interactive directory picker)"
+    echo "Error: no directory supplied and zoxide not installed"
     exit 1
   fi
 fi
