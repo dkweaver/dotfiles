@@ -45,18 +45,17 @@ if git diff --quiet && git diff --cached --quiet && [ -z "$(git ls-files --other
   exit 0
 fi
 
-echo ""
-echo "=== Changes ==="
-echo ""
-git diff
-git diff --cached
-git ls-files --others --exclude-standard | while read -r f; do
-  echo "new file: $f"
-  echo "---"
-  cat "$f"
-  echo ""
-done
+# Collect all changes into one colored diff view
+diff_review=$(
+  git --no-pager diff --color=always
+  git --no-pager diff --cached --color=always
+  for f in $(git ls-files --others --exclude-standard); do
+    printf '\e[1mnew file: %s\e[0m\n' "$f"
+    printf '\e[32m%s\e[0m\n' "$(cat "$f")"
+  done
+)
 
+echo "$diff_review" | less -R --prompt="Review changes (press q to continue)"
 echo ""
 read -rp "Accept these changes? [y/n] " answer
 
@@ -73,7 +72,7 @@ git add -A
 
 # Generate commit message with Claude
 echo "Generating commit message..."
-diff_output=$(git diff --cached)
+diff_output=$(git --no-pager diff --cached)
 commit_msg=$(claude -p "Write a concise git commit message (subject line + optional body) for these changes. Output ONLY the commit message, nothing else:\n\n$diff_output")
 
 echo ""
