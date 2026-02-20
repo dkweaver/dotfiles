@@ -147,20 +147,20 @@ alias ghs='gh copilot suggest'
 alias clpd='claude -p --dangerously-skip-permissions'
 alias cld='claude --dangerously-skip-permissions'
 
-{{ if hasKey . "github_pat" -}}
-export GITHUB_PERSONAL_ACCESS_TOKEN="{{ .github_pat }}"
+{{ if get . "github_pat" -}}
+export GITHUB_PERSONAL_ACCESS_TOKEN="{{ get . "github_pat" }}"
 {{ end -}}
-{{ if hasKey . "openai_api_key" -}}
-export OPENAI_API_KEY="{{ .openai_api_key }}"
+{{ if get . "openai_api_key" -}}
+export OPENAI_API_KEY="{{ get . "openai_api_key" }}"
 {{ end -}}
-{{ if hasKey . "dd_api_key" -}}
-export DD_API_KEY="{{ .dd_api_key }}"
+{{ if get . "dd_api_key" -}}
+export DD_API_KEY="{{ get . "dd_api_key" }}"
 {{ end -}}
-{{ if hasKey . "dd_app_key" -}}
-export DD_APP_KEY="{{ .dd_app_key }}"
+{{ if get . "dd_app_key" -}}
+export DD_APP_KEY="{{ get . "dd_app_key" }}"
 {{ end -}}
-{{ if hasKey . "jira_api_token" -}}
-export JIRA_API_TOKEN="{{ .jira_api_token }}"
+{{ if get . "jira_api_token" -}}
+export JIRA_API_TOKEN="{{ get . "jira_api_token" }}"
 {{ end -}}
 
 ### MANAGED BY RANCHER DESKTOP START (DO NOT EDIT)
