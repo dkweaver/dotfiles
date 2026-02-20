@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "model": "opus",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/dweaver01/proj/ccw/hooks/post-tool-use.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ ! -f /tmp/ccw-baseline-$(basename $PWD) ] && git stash create > /tmp/ccw-baseline-$(basename $PWD) || true"
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "obsidian-claude-plugin@dkw-claude-plugins": true,
+    "workmux-status@workmux": true
+  },
+  "alwaysThinkingEnabled": true,
+  "skipDangerousModePermissionPrompt": true,
+  "feedbackSurveyState": {
+    "lastShownTime": 1754320183344
+  },
+  "effortLevel": "medium",
+  "permissions": {
+    "allow": [
+      "Bash(jira *)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr list *)",
+      "Bash(gh pr diff *)",
+      "Bash(gh pr checks *)",
+      "Bash(gh issue view *)",
+      "Bash(gh issue list *)",
+      "Bash(gh repo view *)",
+      "Bash(gh repo list *)",
+      "Bash(gh run view *)",
+      "Bash(gh run list *)",
+      "Bash(gh api *)",
+      "Bash(gh search *)",
+      "Bash(git status *)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git diff)",
+      "Bash(git log *)",
+      "Bash(git log)",
+      "Bash(git show *)",
+      "Bash(git branch *)",
+      "Bash(git branch)",
+      "Bash(git remote -v)",
+      "Bash(git fetch *)",
+      "Bash(git fetch)",
+      "Bash(git stash list *)",
+      "Bash(git stash list)",
+      "Bash(git tag *)",
+      "Bash(git tag)",
+      "Bash(git rev-parse *)",
+      "Bash(git ls-files *)",
+      "Bash(git blame *)",
+      "Bash(git shortlog *)",
+      "Bash(git describe *)",
+      "Bash(git config --get *)",
+      "Bash(git config --list *)",
+      "Bash(grep *)",
+      "Bash(rg *)",
+      "Bash(ls *)",
+      "Bash(ls)",
+      "Bash(find *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ]
+  }
+}
