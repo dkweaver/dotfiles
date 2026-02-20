@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export PATH="$HOME/.local/bin:$PATH"
+
 usage() {
   echo "Usage: clauto [-d <directory>] <prompt>"
   echo "Runs Claude headless with full permissions, then lets you review changes."
