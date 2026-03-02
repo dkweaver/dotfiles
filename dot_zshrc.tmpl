@@ -144,6 +144,7 @@ export YVM_DIR=/opt/homebrew/opt/yvm
 
 [[ -x /opt/homebrew/bin/brew ]] && eval $(/opt/homebrew/bin/brew shellenv)
 
+command -v fzf &>/dev/null && source <(fzf --zsh)
 command -v zoxide &>/dev/null && eval "$(zoxide init zsh)"
 alias ghs='gh copilot suggest'
 alias clpd='claude -p --dangerously-skip-permissions'
