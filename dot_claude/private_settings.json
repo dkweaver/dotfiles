@@ -81,7 +81,8 @@
       "Bash(find *)",
       "Bash(git add *)",
       "Bash(git commit *)",
-      "Bash(afplay *)"
+      "Bash(afplay *)",
+      "mcp__todoist__*"
     ]
   }
 }
