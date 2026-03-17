@@ -285,12 +285,8 @@ def group_commands_simple(entries):
 
 
 def llm_analyze(groups, existing_rules):
-    """Send grouped commands to Claude for safety analysis and rule suggestions."""
-    try:
-        import anthropic
-    except ImportError:
-        print("Error: anthropic package not installed. Run: pip install anthropic")
-        sys.exit(1)
+    """Send grouped commands to Claude via CLI for safety analysis and rule suggestions."""
+    import subprocess
 
     # Build the prompt
     groups_summary = []
@@ -323,6 +319,7 @@ Guidelines:
 - Read-only commands (status, list, view, log, diff, describe, get) are generally safe
 - Build/test/lint commands (npm test, make, cargo build) are generally safe
 - Commands that modify state (push, deploy, delete, drop, rm) should NOT be auto-allowed
+- Interpreters and shells (python3, node, ruby, bash, sh) with arbitrary arguments should NOT be auto-allowed
 - Write/Edit to project directories the user is actively working in are generally safe
 - MCP tools should be evaluated based on what they do
 - Prefer broader patterns when all examples in a group are safe (e.g., "Bash(npm *)" over individual subcommands)
@@ -330,14 +327,16 @@ Guidelines:
 
 Return ONLY the JSON array, no other text."""
 
-    client = anthropic.Anthropic()
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}],
+    result = subprocess.run(
+        ["claude", "-p", prompt, "--output-format", "text", "--model", "sonnet"],
+        capture_output=True, text=True, timeout=120,
     )
 
-    text = response.content[0].text.strip()
+    if result.returncode != 0:
+        print(f"Error running claude CLI: {result.stderr}")
+        sys.exit(1)
+
+    text = result.stdout.strip()
     # Strip markdown fences if present
     if text.startswith("```"):
         text = text.split("\n", 1)[1]
