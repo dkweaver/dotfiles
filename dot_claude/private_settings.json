@@ -23,6 +23,15 @@
             "command": "[ ! -f /tmp/ccw-baseline-$(basename $PWD) ] && git stash create > /tmp/ccw-baseline-$(basename $PWD) || true"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/permission-audit-log.sh",
+            "timeout": 3
+          }
+        ]
       }
     ]
   },
