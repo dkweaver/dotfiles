@@ -23,7 +23,9 @@
             "command": "[ ! -f /tmp/ccw-baseline-$(basename $PWD) ] && git stash create > /tmp/ccw-baseline-$(basename $PWD) || true"
           }
         ]
-      },
+      }
+    ],
+    "PermissionRequest": [
       {
         "hooks": [
           {
