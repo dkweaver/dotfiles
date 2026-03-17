@@ -12,6 +12,15 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/performance-audit-post.sh",
+            "timeout": 3
+          }
+        ]
       }
     ],
     "PreToolUse": [
@@ -21,6 +30,15 @@
           {
             "type": "command",
             "command": "[ ! -f /tmp/ccw-baseline-$(basename $PWD) ] && git stash create > /tmp/ccw-baseline-$(basename $PWD) || true"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/performance-audit-pre.sh",
+            "timeout": 3
           }
         ]
       }
