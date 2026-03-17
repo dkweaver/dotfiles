@@ -6,11 +6,12 @@ and compares against current settings to identify frequently-used patterns
 that could be safely allowlisted.
 
 Usage:
-    permission-audit.py                  # full audit
+    permission-audit.py                  # LLM-powered analysis with interactive approval
+    permission-audit.py --apply          # same, but apply approved rules to settings.json
     permission-audit.py --since 7d       # last 7 days
     permission-audit.py --top 20         # top 20 patterns
     permission-audit.py --tool Bash      # only Bash commands
-    permission-audit.py --analyze        # LLM-powered analysis with interactive approval
+    permission-audit.py --quick          # heuristic-only (no LLM)
 """
 
 import argparse
@@ -425,8 +426,8 @@ def main():
     parser.add_argument("--top", type=int, default=15, help="Show top N patterns")
     parser.add_argument("--tool", help="Filter to a specific tool (e.g., Bash)")
     parser.add_argument("--all", action="store_true", help="Show all, not just unpermitted")
-    parser.add_argument("--analyze", action="store_true", help="Use LLM to analyze and suggest rules interactively")
-    parser.add_argument("--apply", action="store_true", help="With --analyze, apply approved rules to settings.json")
+    parser.add_argument("--quick", action="store_true", help="Heuristic-only analysis (no LLM)")
+    parser.add_argument("--apply", action="store_true", help="Apply approved rules to settings.json")
     args = parser.parse_args()
 
     # Parse --since
@@ -449,8 +450,8 @@ def main():
         return
 
     # All logged entries required permission (PermissionRequest hook)
-    # LLM-powered analysis mode
-    if args.analyze:
+    # LLM-powered analysis (default)
+    if not args.quick:
         groups = group_commands_simple(entries)
         if not groups:
             print("No unpermitted command groups found.")
@@ -471,6 +472,7 @@ def main():
             print("\nNo rules approved.")
         return
 
+    # Heuristic-only mode (--quick)
     print(f"## Permission Audit")
     print(f"- Total permission prompts logged: **{len(entries)}**")
     if since:
