@@ -113,7 +113,8 @@
       "Bash(afplay *)",
       "Bash(chezmoi *)",
       "Bash(open -a *)",
-      "mcp__todoist__*"
+      "mcp__todoist__*",
+      "mcp__glean_local__*"
     ]
   }
 }

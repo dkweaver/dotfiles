@@ -1,222 +1,200 @@
 #!/usr/bin/env python3
 """Audit Claude Code tool usage and recommend permission allowlist rules.
 
-Reads ~/.claude/permission-audit.jsonl (written by the PreToolUse hook)
-and compares against current settings to identify frequently-used patterns
-that could be safely allowlisted.
+Reads ~/.claude/permission-audit.jsonl (written by the PermissionRequest hook)
+and suggests broadly-applicable, safe CLI command patterns for allowlisting.
+
+Focuses on read-only and safe dev tool patterns — skips directory-specific
+Edit/Write rules and anything that modifies state.
+
+Output is meant to be read by a Claude Code agent, which then works with the
+user to decide which rules to add and where.
 
 Usage:
-    permission-audit.py                  # LLM-powered analysis with interactive approval
-    permission-audit.py --apply          # same, but apply approved rules to settings.json
-    permission-audit.py --since 7d       # last 7 days
-    permission-audit.py --top 20         # top 20 patterns
-    permission-audit.py --tool Bash      # only Bash commands
-    permission-audit.py --quick          # heuristic-only (no LLM)
+    permission-audit.py                  # show safe rule suggestions
+    permission-audit.py --since 7d       # last 7 days only
+    permission-audit.py --json           # output as JSON (for Claude Code)
+    permission-audit.py --all            # include unsafe patterns too (for review)
 """
 
 import argparse
 import json
-import os
 import re
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatch
 from pathlib import Path
 
 LOG_FILE = Path.home() / ".claude" / "permission-audit.jsonl"
-SETTINGS_FILES = [
-    Path.home() / ".claude" / "settings.json",
-    Path.home() / ".claude" / "settings.local.json",
+
+# ── Safety taxonomy ─────────────────────────────────────────────────────────
+# Maps command prefix → (safety, description)
+# "safe"   = read-only or idempotent, fine to always allow
+# "dev"    = build/lint/test tools, safe in dev context
+# "unsafe" = modifies state, never auto-allow
+
+SAFE_COMMANDS = {
+    # Read-only system commands
+    "which":      ("safe",   "command lookup"),
+    "type":       ("safe",   "command lookup"),
+    "file":       ("safe",   "file type detection"),
+    "wc":         ("safe",   "line/word/byte count"),
+    "sort":       ("safe",   "text sorting"),
+    "uniq":       ("safe",   "dedup text"),
+    "head":       ("safe",   "read first lines"),
+    "tail":       ("safe",   "read last lines"),
+    "less":       ("safe",   "pager"),
+    "realpath":   ("safe",   "resolve path"),
+    "dirname":    ("safe",   "parent directory"),
+    "basename":   ("safe",   "filename"),
+    "pwd":        ("safe",   "current directory"),
+    "date":       ("safe",   "date/time"),
+    "whoami":     ("safe",   "current user"),
+    "hostname":   ("safe",   "hostname"),
+    "uname":      ("safe",   "system info"),
+    "sw_vers":    ("safe",   "macOS version"),
+    "diff":       ("safe",   "file comparison"),
+    "md5":        ("safe",   "checksum"),
+    "shasum":     ("safe",   "checksum"),
+    "stat":       ("safe",   "file metadata"),
+    "du":         ("safe",   "disk usage"),
+    "df":         ("safe",   "filesystem info"),
+    "tree":       ("safe",   "directory tree"),
+    "jq":         ("safe",   "JSON processor"),
+    "yq":         ("safe",   "YAML processor"),
+    "pbcopy":     ("safe",   "clipboard copy"),
+    "pbpaste":    ("safe",   "clipboard paste"),
+    "open":       ("safe",   "open files/URLs in macOS apps"),
+    "afplay":     ("safe",   "play audio"),
+    "tput":       ("safe",   "terminal info"),
+    "printf":     ("safe",   "text formatting"),
+
+    # Dev tools — build/lint/test/format
+    "npm run":    ("dev",    "run project scripts"),
+    "npm test":   ("dev",    "run tests"),
+    "pnpm run":   ("dev",    "run project scripts"),
+    "pnpm test":  ("dev",    "run tests"),
+    "yarn run":   ("dev",    "run project scripts"),
+    "yarn test":  ("dev",    "run tests"),
+    "bun run":    ("dev",    "run project scripts"),
+    "bun test":   ("dev",    "run tests"),
+    "cargo build":("dev",    "rust build"),
+    "cargo test": ("dev",    "rust test"),
+    "cargo check":("dev",    "rust check"),
+    "cargo clippy":("dev",   "rust linter"),
+    "cargo fmt":  ("dev",    "rust formatter"),
+    "go build":   ("dev",    "go build"),
+    "go test":    ("dev",    "go test"),
+    "go vet":     ("dev",    "go linter"),
+    "make":       ("dev",    "build system"),
+    "tsc":        ("dev",    "typescript compiler"),
+    "eslint":     ("dev",    "JS linter"),
+    "prettier":   ("dev",    "code formatter"),
+    "black":      ("dev",    "python formatter"),
+    "ruff":       ("dev",    "python linter"),
+    "mypy":       ("dev",    "python type checker"),
+    "pytest":     ("dev",    "python test runner"),
+    "turbo":      ("dev",    "monorepo build tool"),
+
+    # Tmux (read-only)
+    "tmux list-sessions": ("safe", "list tmux sessions"),
+    "tmux list-windows":  ("safe", "list tmux windows"),
+    "tmux list-panes":    ("safe", "list tmux panes"),
+    "tmux display-message":("safe","tmux info"),
+
+    # Docker/k8s (read-only)
+    "docker ps":       ("safe", "list containers"),
+    "docker logs":     ("safe", "container logs"),
+    "docker inspect":  ("safe", "container metadata"),
+    "docker images":   ("safe", "list images"),
+    "kubectl get":     ("safe", "k8s read"),
+    "kubectl describe":("safe", "k8s describe"),
+    "kubectl logs":    ("safe", "k8s logs"),
+
+    # Workmux (read-only)
+    "workmux status":  ("safe", "workspace status"),
+    "workmux list":    ("safe", "list workspaces"),
+}
+
+# Patterns that should NEVER be auto-allowed, regardless of frequency
+NEVER_ALLOW = [
+    "rm *", "rm -rf *", "sudo *", "chmod 777*",
+    "git push --force*", "git reset --hard*", "git checkout -- *",
+    "git clean *", "drop database*", "DROP TABLE*",
+    "curl * | sh", "curl * | bash", "wget * | sh", "wget * | bash",
 ]
 
-# Tools that are always auto-allowed (never need permissions)
-AUTO_ALLOWED_TOOLS = {"Read", "Glob", "Grep", "ToolSearch", "Skill"}
-
-# Dangerous command prefixes that should never be auto-allowed
-DANGEROUS_PATTERNS = [
-    "rm -rf *", "rm -rf /", "git push --force*", "git reset --hard*",
-    "git checkout -- *", "git clean -f*", "drop database*", "DROP TABLE*",
-    "sudo *", "chmod 777*", "curl * | sh", "curl * | bash",
-    "wget * | sh", "wget * | bash",
-]
-
-
-def load_settings():
-    """Load all permission rules from settings files."""
-    rules = {"allow": [], "deny": [], "ask": []}
-    for path in SETTINGS_FILES:
-        if path.exists():
-            try:
-                with open(path) as f:
-                    settings = json.load(f)
-                perms = settings.get("permissions", {})
-                for key in rules:
-                    rules[key].extend(perms.get(key, []))
-            except (json.JSONDecodeError, KeyError):
-                pass
-    return rules
+# Commands that are inherently unsafe due to arbitrary execution
+UNSAFE_BASES = {
+    "python3", "python", "node", "ruby", "perl", "bash", "sh", "zsh",
+    "eval", "exec", "source", "env",
+    "rm", "rmdir", "mv", "cp", "chmod", "chown", "ln",
+    "kill", "killall", "pkill",
+    "curl", "wget", "ssh", "scp", "rsync",
+    "cat",  # often used for heredoc writes, not just reading
+    "npx", "npm exec", "pnpm exec",  # can download and execute arbitrary packages
+    "docker run", "docker exec", "docker rm", "docker rmi",
+    "kubectl delete", "kubectl apply", "kubectl exec",
+    "pip install", "npm install", "brew install",
+}
 
 
-def parse_rule(rule):
-    """Parse 'Tool(specifier)' into (tool, specifier) or (tool, None)."""
-    m = re.match(r'^(\w+)(?:\((.+)\))?$', rule)
-    if m:
-        return m.group(1), m.group(2)
-    return rule, None
 
 
-def matches_rule(tool, specifier, rules_list):
-    """Check if a tool+specifier matches any rule in a list."""
-    for rule in rules_list:
-        rule_tool, rule_spec = parse_rule(rule)
-        if rule_tool == tool or rule_tool == f"{tool}":
-            if rule_spec is None:
-                return True  # bare tool name matches all
-            if specifier and fnmatch(specifier, rule_spec):
-                return True
-    return False
 
 
-def get_specifier(entry):
-    """Extract the permission-relevant specifier from a log entry."""
-    tool = entry["tool"]
-    inp = entry.get("input", {})
-
-    if tool == "Bash":
-        return inp.get("command", "")
-    elif tool in ("Read", "Edit", "Write"):
-        return inp.get("file_path", "")
-    elif tool == "WebFetch":
-        return inp.get("url", "")
-    elif tool == "WebSearch":
-        return inp.get("query", "")
-    elif tool == "Agent":
-        return inp.get("subagent_type", "")
-    elif tool.startswith("mcp__"):
-        return ""  # MCP tools match by name
-    return ""
-
-
-def would_need_permission(entry, rules):
-    """Determine if a tool call would have required user permission."""
-    tool = entry["tool"]
-
-    # These tools never need permission
-    if tool in AUTO_ALLOWED_TOOLS:
-        return False
-
-    specifier = get_specifier(entry)
-
-    # Check deny first (always blocks)
-    if matches_rule(tool, specifier, rules["deny"]):
-        return True  # denied = would prompt (or block)
-
-    # Check allow
-    if matches_rule(tool, specifier, rules["allow"]):
-        return False  # explicitly allowed
-
-    # Not in any rule = would need permission
-    return True
-
-
-def generalize_bash_command(cmd):
-    """Generate candidate allowlist patterns for a bash command."""
-    if not cmd:
-        return []
-
-    parts = cmd.split()
-    if not parts:
-        return []
-
-    candidates = []
-    base = parts[0]
-
-    # Exact match
-    candidates.append(cmd)
-
-    # Base command + wildcard
-    if len(parts) > 1:
-        candidates.append(f"{base} *")
-
-    # For common safe commands, suggest the broadest pattern
-    safe_prefixes = [
-        "npm", "npx", "node", "pnpm", "yarn", "bun",
-        "python3", "python", "pip",
-        "jq", "cat", "echo", "printf", "wc", "sort", "uniq", "head", "tail",
-        "ls", "pwd", "date", "env", "which", "type",
-        "git status", "git log", "git diff", "git branch", "git show",
-        "git fetch", "git stash",
-        "gh pr", "gh issue", "gh api", "gh run", "gh search",
-        "jira issue", "jira me", "jira sprint", "jira project",
-        "workmux status", "workmux capture", "workmux wait",
-        "docker ps", "docker logs", "docker inspect",
-        "kubectl get", "kubectl describe", "kubectl logs",
-        "curl -s",
-        "test ", "[",
-    ]
-
-    for prefix in safe_prefixes:
-        if cmd.startswith(prefix):
-            candidates.append(f"{prefix} *")
-            # Also suggest just the base command
-            base_word = prefix.split()[0]
-            if base_word != prefix:
-                candidates.append(f"{base_word} *")
-            break
-
-    return candidates
-
-
-def generalize_file_path(path, tool):
-    """Generate candidate allowlist patterns for a file path."""
-    if not path:
-        return []
-
-    candidates = []
-    home = str(Path.home())
-
-    # Exact path
-    candidates.append(f"{tool}({path})")
-
-    # Directory wildcard
-    parent = str(Path(path).parent)
-    candidates.append(f"{tool}({parent}/*)")
-    candidates.append(f"{tool}({parent}/**)")
-
-    # Home-relative
-    if path.startswith(home):
-        rel = path[len(home):]
-        candidates.append(f"{tool}(~{rel})")
-        rel_parent = str(Path(rel).parent)
-        candidates.append(f"{tool}(~{rel_parent}/**)")
-
-    # Project-relative (use /path format)
-    # Find common project roots
-    for proj_root in ["/Users/dweaver01/proj/", home + "/proj/"]:
-        if path.startswith(proj_root):
-            after_proj = path[len(proj_root):]
-            # e.g., next/apps/content/... → suggest per-project
-            parts = after_proj.split("/", 1)
-            if len(parts) > 1:
-                candidates.append(f"{tool}({proj_root}{parts[0]}/**)")
-
-    return candidates
-
-
-def is_dangerous(cmd):
-    """Check if a command matches known dangerous patterns."""
-    for pattern in DANGEROUS_PATTERNS:
+def is_never_allow(cmd):
+    """Check if a command matches a never-allow pattern."""
+    for pattern in NEVER_ALLOW:
         if fnmatch(cmd, pattern):
             return True
     return False
 
 
+def classify_command(cmd):
+    """Classify a bash command and return (safety, rule, description) or None.
+
+    Returns the broadest safe rule for the command, or None if unsafe/unknown.
+    """
+    parts = cmd.split()
+    if not parts:
+        return None
+
+    base = parts[0]
+
+    # Check never-allow first
+    if is_never_allow(cmd):
+        return ("unsafe", None, "matches never-allow pattern")
+
+    # Check unsafe base commands
+    if base in UNSAFE_BASES:
+        return ("unsafe", None, f"{base} runs arbitrary code")
+
+    # Check 2-word prefixes first (more specific), then 1-word
+    two_word = " ".join(parts[:2]) if len(parts) >= 2 else None
+
+    if two_word and two_word in SAFE_COMMANDS:
+        safety, desc = SAFE_COMMANDS[two_word]
+        return (safety, f"Bash({two_word} *)", desc)
+
+    # Check if the 2-word combo is an unsafe base
+    if two_word and two_word in UNSAFE_BASES:
+        return ("unsafe", None, f"{two_word} modifies state")
+
+    if base in SAFE_COMMANDS:
+        safety, desc = SAFE_COMMANDS[base]
+        rule = f"Bash({base} *)" if len(parts) > 1 else f"Bash({base})"
+        return (safety, rule, desc)
+
+    return None  # unknown — don't suggest
+
+
 def load_log(since=None):
     """Load and optionally filter log entries."""
     if not LOG_FILE.exists():
-        print(f"No log file found at {LOG_FILE}")
-        print("The PreToolUse hook needs to be configured first.")
+        print(f"No log file found at {LOG_FILE}", file=sys.stderr)
+        print("The PermissionRequest hook needs to be configured first.", file=sys.stderr)
         sys.exit(1)
 
     entries = []
@@ -234,199 +212,65 @@ def load_log(since=None):
                 entries.append(entry)
             except (json.JSONDecodeError, KeyError):
                 continue
-
     return entries
 
 
-def group_commands_simple(entries):
-    """Group tool calls by base command / tool type."""
-    groups = defaultdict(lambda: {"commands": [], "count": 0, "examples": []})
+def analyze(entries, show_all=False):
+    """Analyze entries and return suggested rules.
 
+    Returns (suggestions, unknown) where suggestions is a list of dicts:
+    {rule, safety, count, description, examples}
+    """
+    bash_commands = []
     for e in entries:
-        tool = e["tool"]
-        inp = e.get("input", {})
+        if e.get("tool") == "Bash":
+            cmd = e.get("input", {}).get("command", "")
+            if cmd:
+                bash_commands.append(cmd)
 
-        if tool == "Bash":
-            cmd = inp.get("command", "")
-            parts = cmd.split()
-            if not parts:
-                continue
-            # Group by base command (first word)
-            base = parts[0]
-            key = f"Bash:{base}"
-            groups[key]["commands"].append(cmd)
-            groups[key]["count"] += 1
-            if len(groups[key]["examples"]) < 5:
-                if cmd not in groups[key]["examples"]:
-                    groups[key]["examples"].append(cmd)
-        elif tool in ("Edit", "Write"):
-            fp = inp.get("file_path", "")
-            parent = str(Path(fp).parent)
-            key = f"{tool}:{parent}"
-            groups[key]["commands"].append(fp)
-            groups[key]["count"] += 1
-            if len(groups[key]["examples"]) < 5:
-                if fp not in groups[key]["examples"]:
-                    groups[key]["examples"].append(fp)
-        elif tool.startswith("mcp__"):
-            key = f"MCP:{tool}"
-            groups[key]["count"] += 1
-            groups[key]["examples"] = [tool]
-        else:
-            spec = get_specifier(e) or "(none)"
-            key = f"{tool}:{spec[:40]}"
-            groups[key]["commands"].append(spec)
-            groups[key]["count"] += 1
-            if len(groups[key]["examples"]) < 5:
-                if spec not in groups[key]["examples"]:
-                    groups[key]["examples"].append(spec)
+    rule_data = {}  # rule -> {safety, desc, count, examples}
+    unknown_commands = Counter()
 
-    return dict(sorted(groups.items(), key=lambda x: -x[1]["count"]))
+    for cmd in bash_commands:
+        result = classify_command(cmd)
+        if result is None:
+            base = cmd.split()[0] if cmd.split() else cmd
+            unknown_commands[base] += 1
+            continue
 
+        safety, rule, desc = result
+        if rule is None:
+            if show_all:
+                base = cmd.split()[0] if cmd.split() else cmd
+                unknown_commands[f"[UNSAFE] {base}"] += 1
+            continue
 
-def llm_analyze(groups, existing_rules):
-    """Send grouped commands to Claude via CLI for safety analysis and rule suggestions."""
-    import subprocess
+        if rule not in rule_data:
+            rule_data[rule] = {
+                "rule": rule,
+                "safety": safety,
+                "description": desc,
+                "count": 0,
+                "examples": [],
+            }
+        rule_data[rule]["count"] += 1
+        if len(rule_data[rule]["examples"]) < 3:
+            short = cmd[:100]
+            if short not in rule_data[rule]["examples"]:
+                rule_data[rule]["examples"].append(short)
 
-    # Build the prompt
-    groups_summary = []
-    for key, data in groups.items():
-        groups_summary.append({
-            "group": key,
-            "count": data["count"],
-            "examples": data["examples"][:5],
-        })
-
-    prompt = f"""You are analyzing Claude Code tool usage to recommend permission allowlist rules.
-
-Current allowlist rules:
-{json.dumps(existing_rules.get("allow", []), indent=2)}
-
-Here are groups of tool calls that currently require permission prompts (not covered by existing rules):
-
-{json.dumps(groups_summary, indent=2)}
-
-For each group, recommend whether it should be allowlisted and what rule pattern to use.
-
-Respond with a JSON array of objects, each with:
-- "group": the group key
-- "rule": the recommended allowlist rule string (e.g., "Bash(npm *)" or "Edit(/path/**)")
-- "safe": true/false - whether you recommend allowlisting this
-- "reason": brief explanation of why it's safe or not (1 sentence)
-- "risk": "none", "low", "medium", or "high"
-
-Guidelines:
-- Read-only commands (status, list, view, log, diff, describe, get) are generally safe
-- Build/test/lint commands (npm test, make, cargo build) are generally safe
-- Commands that modify state (push, deploy, delete, drop, rm) should NOT be auto-allowed
-- Interpreters and shells (python3, node, ruby, bash, sh) with arbitrary arguments should NOT be auto-allowed
-- Write/Edit to project directories the user is actively working in are generally safe
-- MCP tools should be evaluated based on what they do
-- Prefer broader patterns when all examples in a group are safe (e.g., "Bash(npm *)" over individual subcommands)
-- But if a base command has both safe and unsafe subcommands (e.g., git), suggest specific safe subcommand patterns instead
-
-Return ONLY the JSON array, no other text."""
-
-    result = subprocess.run(
-        ["claude", "-p", prompt, "--output-format", "text", "--model", "sonnet"],
-        capture_output=True, text=True, timeout=120,
-    )
-
-    if result.returncode != 0:
-        print(f"Error running claude CLI: {result.stderr}")
-        sys.exit(1)
-
-    text = result.stdout.strip()
-    # Strip markdown fences if present
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1]
-        if text.endswith("```"):
-            text = text.rsplit("```", 1)[0]
-    return json.loads(text)
-
-
-def interactive_approve(suggestions):
-    """Present suggestions one-by-one for user approval. Returns approved rules."""
-    approved = []
-    risk_colors = {"none": "\033[32m", "low": "\033[32m", "medium": "\033[33m", "high": "\033[31m"}
-    reset = "\033[0m"
-
-    print(f"\n{'='*60}")
-    print(f"  LLM Permission Suggestions ({len(suggestions)} groups)")
-    print(f"{'='*60}\n")
-
-    for i, s in enumerate(suggestions, 1):
-        risk = s.get("risk", "unknown")
-        color = risk_colors.get(risk, "")
-        safe = s.get("safe", False)
-        default = "Y" if safe else "N"
-        other = "n" if safe else "y"
-
-        print(f"[{i}/{len(suggestions)}] {s['group']}")
-        print(f"  Rule:   {s['rule']}")
-        print(f"  Risk:   {color}{risk}{reset}")
-        print(f"  Reason: {s['reason']}")
-
-        if not safe:
-            print(f"  ⚠  LLM recommends AGAINST allowlisting this")
-
-        try:
-            answer = input(f"  Approve? [{default}/{other}] ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print("\nAborted.")
-            break
-
-        if answer == "" and safe:
-            approved.append(s["rule"])
-            print(f"  → Approved\n")
-        elif answer == "y":
-            approved.append(s["rule"])
-            print(f"  → Approved\n")
-        else:
-            print(f"  → Skipped\n")
-
-    return approved
-
-
-def apply_rules(new_rules):
-    """Add approved rules to ~/.claude/settings.json."""
-    settings_path = Path.home() / ".claude" / "settings.json"
-    if not settings_path.exists():
-        print(f"Settings file not found: {settings_path}")
-        return False
-
-    with open(settings_path) as f:
-        settings = json.load(f)
-
-    allow = settings.setdefault("permissions", {}).setdefault("allow", [])
-    added = []
-    for rule in new_rules:
-        if rule not in allow:
-            allow.append(rule)
-            added.append(rule)
-
-    if not added:
-        print("No new rules to add (all already present).")
-        return True
-
-    with open(settings_path, "w") as f:
-        json.dump(settings, f, indent=2)
-        f.write("\n")
-
-    print(f"\nAdded {len(added)} rules to {settings_path}:")
-    for r in added:
-        print(f"  + {r}")
-    return True
+    suggestions = sorted(rule_data.values(), key=lambda x: -x["count"])
+    return suggestions, dict(unknown_commands)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Audit Claude Code permissions")
+    parser = argparse.ArgumentParser(
+        description="Suggest safe, broadly-applicable Claude Code permission rules"
+    )
     parser.add_argument("--since", help="Time window (e.g., 7d, 24h, 30d)")
-    parser.add_argument("--top", type=int, default=15, help="Show top N patterns")
-    parser.add_argument("--tool", help="Filter to a specific tool (e.g., Bash)")
-    parser.add_argument("--all", action="store_true", help="Show all, not just unpermitted")
-    parser.add_argument("--quick", action="store_true", help="Heuristic-only analysis (no LLM)")
-    parser.add_argument("--apply", action="store_true", help="Apply approved rules to settings.json")
+    parser.add_argument("--json", action="store_true", help="Output as JSON (for Claude Code)")
+    parser.add_argument("--all", action="store_true", help="Also show unsafe/unknown patterns")
+    parser.add_argument("--min-count", type=int, default=2, help="Min occurrences to suggest (default: 2)")
     args = parser.parse_args()
 
     # Parse --since
@@ -439,166 +283,84 @@ def main():
             since = datetime.now(timezone.utc).astimezone() - delta
 
     entries = load_log(since)
-    rules = load_settings()
-
-    if args.tool:
-        entries = [e for e in entries if e["tool"] == args.tool]
 
     if not entries:
-        print("No matching log entries found.")
-        return
-
-    # All logged entries required permission (PermissionRequest hook)
-    # LLM-powered analysis (default)
-    if not args.quick:
-        groups = group_commands_simple(entries)
-        if not groups:
-            print("No unpermitted command groups found.")
-            return
-
-        print(f"Found {len(groups)} unpermitted command groups. Sending to LLM for analysis...\n")
-        suggestions = llm_analyze(groups, rules)
-        approved = interactive_approve(suggestions)
-
-        if approved:
-            print(f"\n{len(approved)} rules approved.")
-            if args.apply:
-                apply_rules(approved)
-            else:
-                print("\nTo apply, re-run with --apply or add these to settings.json:")
-                print(json.dumps(approved, indent=2))
+        if args.json:
+            print(json.dumps({"suggestions": [], "message": "No log entries found"}))
         else:
-            print("\nNo rules approved.")
+            print("No log entries found.")
         return
 
-    # Heuristic-only mode (--quick)
-    print(f"## Permission Audit")
-    print(f"- Total permission prompts logged: **{len(entries)}**")
+    suggestions, unknown = analyze(entries, show_all=args.all)
+
+    # Filter by min count
+    suggestions = [s for s in suggestions if s["count"] >= args.min_count]
+
+    if args.json:
+        output = {
+            "suggestions": [
+                {"rule": s["rule"], "safety": s["safety"], "count": s["count"],
+                 "description": s["description"], "examples": s["examples"]}
+                for s in suggestions
+            ],
+            "total_entries": len(entries),
+        }
+        if args.all and unknown:
+            output["unknown_or_unsafe"] = unknown
+        print(json.dumps(output, indent=2))
+        return
+
+    # Human-readable output
+    total_bash = sum(1 for e in entries if e.get("tool") == "Bash")
+    print(f"Permission audit: {len(entries)} prompts logged ({total_bash} Bash)")
     if since:
-        print(f"- Time window: since {since.strftime('%Y-%m-%d %H:%M')}")
+        print(f"Since: {since.strftime('%Y-%m-%d %H:%M')}")
     print()
 
-    # Group by tool
-    by_tool = defaultdict(list)
-    for e in entries:
-        by_tool[e["tool"]].append(e)
+    if not suggestions:
+        print("No new safe rules to suggest. Your allowlist looks good!")
+        if unknown and args.all:
+            print(f"\nUnknown/unsafe patterns (not suggested):")
+            for cmd, count in sorted(unknown.items(), key=lambda x: -x[1]):
+                print(f"  {count:3d}x  {cmd}")
+        return
 
-    print(f"## Unpermitted Tool Calls by Type\n")
-    for tool, tool_entries in sorted(by_tool.items(), key=lambda x: -len(x[1])):
-        print(f"### {tool} ({len(tool_entries)} calls)\n")
+    # Group by safety level
+    safe_rules = [s for s in suggestions if s["safety"] == "safe"]
+    dev_rules = [s for s in suggestions if s["safety"] == "dev"]
 
-        # Count patterns
-        if tool == "Bash":
-            # Group by command prefix (first 2 words)
-            prefix_counter = Counter()
-            cmd_counter = Counter()
-            for e in tool_entries:
-                cmd = e["input"].get("command", "")
-                cmd_counter[cmd] += 1
-                parts = cmd.split()
-                prefix = " ".join(parts[:2]) if len(parts) >= 2 else parts[0] if parts else ""
-                prefix_counter[prefix] += 1
+    if safe_rules:
+        print("## Read-only / always safe\n")
+        for s in safe_rules:
+            print(f"  {s['count']:3d}x  {s['rule']:<35s}  # {s['description']}")
+            for ex in s["examples"]:
+                print(f"          e.g. {ex}")
+        print()
 
-            print("| Count | Command Prefix | Example | Recommended Rule | Safe? |")
-            print("|---|---|---|---|---|")
+    if dev_rules:
+        print("## Dev tools (build/lint/test)\n")
+        for s in dev_rules:
+            print(f"  {s['count']:3d}x  {s['rule']:<35s}  # {s['description']}")
+            for ex in s["examples"]:
+                print(f"          e.g. {ex}")
+        print()
 
-            for prefix, count in prefix_counter.most_common(args.top):
-                # Find an example
-                example = ""
-                for e in tool_entries:
-                    cmd = e["input"].get("command", "")
-                    if cmd.startswith(prefix):
-                        example = cmd[:80]
-                        break
+    if unknown and args.all:
+        print("## Unknown / unsafe (NOT suggested)\n")
+        for cmd, count in sorted(unknown.items(), key=lambda x: -x[1]):
+            print(f"  {count:3d}x  {cmd}")
+        print()
 
-                # Generate recommendation
-                dangerous = is_dangerous(f"{prefix} *")
-                if dangerous:
-                    rule = f"~~`Bash({prefix} *)`~~"
-                    safe = "NO"
-                else:
-                    rule = f"`Bash({prefix} *)`"
-                    safe = "yes"
-
-                print(f"| {count} | `{prefix}` | `{example}` | {rule} | {safe} |")
-
-            print()
-
-        elif tool in ("Edit", "Write"):
-            path_counter = Counter()
-            dir_counter = Counter()
-            for e in tool_entries:
-                fp = e["input"].get("file_path", "")
-                path_counter[fp] += 1
-                parent = str(Path(fp).parent)
-                dir_counter[parent] += 1
-
-            print("| Count | Directory | Recommended Rule |")
-            print("|---|---|---|")
-
-            for directory, count in dir_counter.most_common(args.top):
-                # Simplify home paths
-                home = str(Path.home())
-                display = directory.replace(home, "~")
-                rule = f"`{tool}({directory}/**)`"
-                print(f"| {count} | `{display}` | {rule} |")
-
-            print()
-
-        elif tool.startswith("mcp__"):
-            print(f"Recommended: `{tool}`\n")
-
-        else:
-            spec_counter = Counter()
-            for e in tool_entries:
-                spec = get_specifier(e) or "(no specifier)"
-                spec_counter[spec[:80]] += 1
-
-            print("| Count | Specifier |")
-            print("|---|---|")
-            for spec, count in spec_counter.most_common(args.top):
-                print(f"| {count} | `{spec}` |")
-            print()
-
-    # Generate copy-paste allowlist
-    print("## Suggested Allowlist Rules\n")
-    print("Copy-paste into `~/.claude/settings.json` under `permissions.allow`:\n")
+    # Summary
+    all_rules = [s["rule"] for s in suggestions]
+    print(f"---")
+    print(f"{len(all_rules)} new rules to add:")
+    print()
     print("```json")
+    print(json.dumps(all_rules, indent=2))
+    print("```")
 
-    suggestions = []
-    for tool, tool_entries in sorted(by_tool.items(), key=lambda x: -len(x[1])):
-        if tool == "Bash":
-            prefix_counter = Counter()
-            for e in tool_entries:
-                cmd = e["input"].get("command", "")
-                parts = cmd.split()
-                prefix = " ".join(parts[:2]) if len(parts) >= 2 else parts[0] if parts else ""
-                prefix_counter[prefix] += 1
-
-            for prefix, count in prefix_counter.most_common(args.top):
-                rule = f"Bash({prefix} *)"
-                if not is_dangerous(rule) and count >= 2:
-                    suggestions.append(rule)
-
-        elif tool in ("Edit", "Write"):
-            dir_counter = Counter()
-            for e in tool_entries:
-                fp = e["input"].get("file_path", "")
-                parent = str(Path(fp).parent)
-                dir_counter[parent] += 1
-
-            for directory, count in dir_counter.most_common(5):
-                if count >= 2:
-                    suggestions.append(f"{tool}({directory}/**)")
-
-        elif tool.startswith("mcp__"):
-            suggestions.append(tool)
-
-    print(json.dumps(suggestions, indent=2))
-    print("```\n")
-
-    print("**Review before applying.** Rules with count >= 2 and no dangerous patterns are included.")
-    print("Run `permission-audit.py --tool Bash` for deeper Bash analysis.")
+    print(f"\nReview with your agent to decide which rules to add.")
 
 
 if __name__ == "__main__":
