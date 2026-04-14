@@ -55,6 +55,12 @@
       }
     ]
   },
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"]
+    }
+  },
   "enabledPlugins": {
     "obsidian-claude-plugin@dkw-claude-plugins": true,
     "workmux-status@workmux": true
